@@ -382,18 +382,17 @@ class Base {
 
     return this.getOrCreateMatrixRoomFromThirdPartyRoomId(roomId).then((matrixRoomId) => {
       return this.getUserClient(roomId, senderId, senderName).then((client) => {
-        return this.downloadFileFromPublicWeb(url).then((localPath) => {
-          return client.uploadContent(fs.createReadStream(localPath), {
-            name: text,
-            type: mimetype,
-            rawResponse: false
-          }).then((res) => client.sendImageMessage(matrixRoomId, res.content_uri, {
-            mimetype: mimetype,
-            h: h,
-            w: w,
-            size: fs.statSync(localPath).size
-          }, this.tagMatrixMessage(text))).then(() => fs.unlink(localPath));
-        });
+        const file = this.downloadFileFromPublicWeb(url);
+        return client.uploadContent(file, {
+          name: text,
+          type: mimetype,
+          rawResponse: false
+        }).then((res) => client.sendImageMessage(matrixRoomId, res.content_uri, {
+          mimetype: mimetype,
+          h: h,
+          w: w,
+          size: fs.statSync(localPath).size
+        }, this.tagMatrixMessage(text))).then(() => fs.unlink(localPath));
       });
     });
   }
@@ -490,10 +489,19 @@ class Base {
       logger.info("picture message from riot", body, info);
 
       const imageUrl = this.puppet.getClient().mxcUrlToHttp(data.content.url);
-      const ext = mime.extension(info.mimetype);
-      return this.downloadFileFromPublicWeb(imageUrl, ext).then((localPath)=>{
-        return this.sendPictureMessageAsPuppetToThirdPartyRoomWithId(thirdPartyRoomId, msg, localPath, data, imageUrl);
-      });
+
+      return new Promise(function(resolve, reject) {
+        const ext = '.' + mime.extension(info.mimetype);
+        const localPath = tempfile(ext);
+        const file = this.downloadFileFromPublicWeb(imageUrl);
+        const wstream = fs.createWriteStream(localPath);
+        wstream.on('error', reject);
+        wstream.on('finish', () => {
+          info('Downloaded picture to %s', localPath);
+          resolve(localPath);
+        });
+        wstream.write(file);
+      }).then((localPath) => this.sendPictureMessageAsPuppetToThirdPartyRoomWithId(thirdPartyRoomId, msg, localPath, data, imageUrl));
     }
   }
   defaultDeduplicationTag() {
@@ -512,22 +520,18 @@ class Base {
    * Download a file from the web
    *
    * @param {string} webUrl any resource on the public web
-   * @param {string} optional file extension to use for tempfile, e.g. ".png"
-   * @returns {Promise} path to local file
+   * @returns {stream} the file as a readable stream
    */
-  downloadFileFromPublicWeb(webUrl, ext=null) {
+  downloadFileFromPublicWeb(webUrl) {
     const { info }  = debug(this.downloadFileFromPublicWeb.name);
-    return new Promise(function(resolve, reject) {
-      const filepath = tempfile(ext && ext[0] !== '.' ? '.'+ext : ext);
-      const destination = fs.createWriteStream(filepath);
-      info('downloading', webUrl);
-      const download = needle.get(webUrl).pipe(destination);
-      download.on('error', reject);
-      download.on('finish', ()=>{
-        info('downloaded file', filepath);
-        resolve(filepath);
-      });
+    info('downloading', webUrl);
+    const download = needle.get(webUrl);
+    download.on('end', (err) => {
+      if (err) {
+        info('Error when downloading file: %s', err.message);
+      }
     });
+    return download;
   }
   /**
    * Sets the ghost avatar using a regular URL
@@ -553,12 +557,11 @@ class Base {
       } else {
         const ext = path.extname(avatarUrl);
         info('downloading avatar from public web', avatarUrl);
-        return this.downloadFileFromPublicWeb(avatarUrl, ext).then((localPath)=>{
-          return client.uploadContent(fs.createReadStream(localPath), {
-            name: path.basename(avatarUrl),
-            type: mime.contentType(ext),
-            rawResponse: false
-          });
+        const file = this.downloadFileFromPublicWeb(avatarUrl);
+        return client.uploadContent(file, {
+          name: path.basename(avatarUrl),
+          type: mime.contentType(ext),
+          rawResponse: false
         }).then((res)=>{
           const contentUri = res.content_uri;
           info('uploaded avatar and got back content uri', contentUri);
